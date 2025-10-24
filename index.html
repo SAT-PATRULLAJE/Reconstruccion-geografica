@@ -8,8 +8,19 @@
     :root{--panel-bg:rgba(255,255,255,.96);--shadow:0 8px 24px rgba(0,0,0,.15);--radius:14px;--gap:10px;--font:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
     html,body{height:100%;margin:0;font-family:var(--font)}
     #map{height:100%;width:100%}
-    .ui{position:absolute;inset:12px 12px auto 12px;z-index:2;background:var(--panel-bg);backdrop-filter:blur(4px);border-radius:var(--radius);box-shadow:var(--shadow);padding:12px;max-width:420px}
-    @media (max-width:680px){.ui{inset:auto 10px 10px 10px;max-width:none;width:auto}}
+     
+    .ui{position:absolute;inset:12px 12px auto 12px;z-index:2;background:var(--panel-bg);backdrop-filter:blur(4px);border-radius:var(--radius);box-shadow:var(--shadow);padding:12px;max-width:420px;max-height:70vh;overflow:auto}
+     
+    #togglePanel{position:absolute;right:12px;top:12px;z-index:3;border:1px solid #ddd;border-radius:12px;padding:10px 12px;background:#fff;cursor:pointer;box-shadow:var(--shadow)}
+    #togglePanel[aria-pressed="true"]{background:#f3f3f3}
+     
+    @media (max-width: 700px){
+      .ui{inset:auto 10px 68px 10px;max-width:none;width:auto;max-height:60vh}
+      #togglePanel{top:auto;bottom:12px}
+    }
+    @media (max-height: 480px){
+      .ui{max-height:58vh}
+    }
     h3{margin:0 0 8px;font-size:16px}
     .row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin:8px 0}
     .kpi{font-weight:700}
@@ -22,7 +33,14 @@
     @media (max-width:480px){.grid{grid-template-columns:1fr}}
     .card{border:1px solid #eaeaea;border-radius:12px;padding:10px;background:#fff;font-size:12px;line-height:1.25}
     .badge{font-size:11px;opacity:.85;margin-top:8px}
-    .float-note{position:absolute;z-index:2;right:12px;bottom:12px;background:var(--panel-bg);border-radius:10px;padding:6px 10px;box-shadow:var(--shadow);font-size:12px;display:none}
+    .float-note{position:absolute;z-index:2;right:12px;bottom:60px;background:var(--panel-bg);border-radius:10px;padding:6px 10px;box-shadow:var(--shadow);font-size:12px;display:none}
+     
+    @media (max-width: 400px){
+      .controls button,.controls select{padding:10px 12px;font-size:14px}
+      input[type="range"]{height:28px}
+      .grid{grid-template-columns:1fr}
+      .ui{padding:10px}
+    }
   </style>
 
   
@@ -37,8 +55,9 @@
 </head>
 <body>
   <div id="map"></div>
+  <button id="togglePanel" aria-pressed="false" title="Mostrar/ocultar panel">☰</button>
 
-  <div class="ui">
+  <div class="ui" id="panel">
     <h3>Reconstrucción geográfica y cinemática</h3>
     <div class="row"><div>Posición en la trayectoria</div><div id="idxLabel" class="kpi">-</div></div>
     <input id="slider" type="range" min="0" max="0" step="1" value="0"/>
@@ -65,6 +84,7 @@
         <div><strong>Total recorrido</strong></div><div id="totalDist">-</div>
         <div><strong>Tiempo total</strong></div><div id="totalTime">-</div>
         <div><strong>Vel. media</strong></div><div id="avgSpeed">-</div>
+        <div><strong>Cronómetro (sim)</strong></div><div id="playClock">00:00</div>
       </div>
       <div class="card">
         <div><strong>Punto actual</strong></div>
@@ -88,8 +108,13 @@
 
   <script defer>
     
-    const trayectoria = JSON.parse(document.getElementById('TRAY_JSON').textContent);
-    const puntoImpacto = JSON.parse(document.getElementById('IMPACTO_JSON').textContent);
+    let trayectoria=[],puntoImpacto=null;
+    try{
+      trayectoria = JSON.parse(document.getElementById('TRAY_JSON').textContent);
+      puntoImpacto = JSON.parse(document.getElementById('IMPACTO_JSON').textContent);
+    }catch(e){
+      console.error('Error parseando JSON de la plantilla:',e);
+    }
 
     
     const TZ='America/Argentina/Mendoza';
@@ -104,6 +129,7 @@
       const A=Math.sin(dLat/2)**2+Math.cos(t(a))*Math.cos(t(c))*Math.sin(dLon/2)**2;return 2*R*Math.atan2(Math.sqrt(A),Math.sqrt(1-A))}
     const fmtM=m=>m<1000?`${m.toFixed(1)} m`:`${(m/1000).toFixed(3)} km`;
     function fmtS(s){if(!isFinite(s))return'-';s=Math.round(s);const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),r=s%60;return(h?`${h}h `:'')+(m?`${m}m `:'')+`${r}s`;}
+    const fmtClock=s=>{if(!isFinite(s)||s<0)s=0; s=Math.floor(s); const m=Math.floor(s/60), r=s%60; return (m<10?'0':'')+m+':'+(r<10?'0':'')+r;}
     const speedColor=(v,z)=>z?'#F00':(v<5?'#F90':(v<30?'#0F0':'#00F'));
     function showNote(h,ms=3000){const el=document.getElementById('labelsLayer');el.innerHTML=h;el.style.display='block';clearTimeout(showNote._t);showNote._t=setTimeout(()=>{el.style.display='none'},ms);}
 
@@ -121,17 +147,13 @@
     
     let map,polyline,movingMarker,infoWindow,animTimer=null,animSpeed=1,curIndex=0,currentBase='google';
 
+    
+    let simElapsedS=0; 
+    function setClock(v){document.getElementById('playClock').textContent=fmtClock(v)}
+
     function initMapReal(){
       map=new google.maps.Map(document.getElementById('map'),{zoom:17,center:{lat:puntoImpacto.lat,lng:puntoImpacto.lng},mapTypeId:'satellite',gestureHandling:'greedy'});
-      const esri=new google.maps.ImageMapType({
-  getTileUrl:(c,z)=>{
-    return 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/'
-      + z + '/' + c.y + '/' + c.x;
-  },
-  tileSize:new google.maps.Size(256,256),
-  name:'EsriWorldImagery',
-  maxZoom:19
-});
+      const esri=new google.maps.ImageMapType({getTileUrl:(c,z)=>{return 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/'+z+'/'+c.y+'/'+c.x;},tileSize:new google.maps.Size(256,256),name:'EsriWorldImagery',maxZoom:19});
       map.mapTypes.set('esri',esri);
 
       const path=P.map(p=>({lat:p.lat,lng:p.lng}));
@@ -146,12 +168,18 @@
       if(path.length){movingMarker=new google.maps.Marker({position:path[0],map,icon:tramIcon});}
 
       setupUI();updateUI(0);attachMeasureHandlers();
+      
+      if(window.innerWidth<700){togglePanel(true)}
     }
     window.__initMapReal=initMapReal;if(window.__initMapPending){try{window.__initMapReal()}finally{window.__initMapPending=false}}
 
     function setupUI(){const s=document.getElementById('slider'),pb=document.getElementById('playBtn'),ps=document.getElementById('pauseBtn'),rb=document.getElementById('resetBtn'),sp=document.getElementById('speedSel'),tb=document.getElementById('baseToggleBtn');
-      s.max=Math.max(0,P.length-1);s.value=0;pb.onclick=()=>startAnimation();ps.onclick=()=>stopAnimation();rb.onclick=()=>{stopAnimation();goToIndex(0)};sp.onchange=e=>{animSpeed=Number(e.target.value)||1};s.oninput=e=>{stopAnimation();goToIndex(Number(e.target.value))};tb.onclick=()=>toggleBase();
-      document.getElementById('totalDist').textContent=fmtM(totalDistM);document.getElementById('totalTime').textContent=fmtS(totalTimeS);document.getElementById('avgSpeed').textContent=isFinite(avgSpeed)?`${avgSpeed.toFixed(1)} km/h`:'-';}
+      s.max=Math.max(0,P.length-1);s.value=0;pb.onclick=()=>startAnimation();ps.onclick=()=>stopAnimation();rb.onclick=()=>{stopAnimation();goToIndex(0);simElapsedS=0;setClock(simElapsedS)};sp.onchange=e=>{animSpeed=Number(e.target.value)||1};s.oninput=e=>{stopAnimation();goToIndex(Number(e.target.value))};tb.onclick=()=>toggleBase();
+      document.getElementById('totalDist').textContent=fmtM(totalDistM);document.getElementById('totalTime').textContent=fmtS(totalTimeS);document.getElementById('avgSpeed').textContent=isFinite(avgSpeed)?`${avgSpeed.toFixed(1)} km/h`:'-';
+      
+      document.getElementById('togglePanel').addEventListener('click',()=>togglePanel());
+      setClock(simElapsedS);
+    }
     function toggleBase(){if(!map)return; if(currentBase==='google'){map.setMapTypeId('esri');currentBase='esri';showNote('Base: Esri World Imagery')}else{map.setMapTypeId('satellite');currentBase='google';showNote('Base: Google Satélite')}}
     function goToIndex(i){if(!P.length||!movingMarker)return;curIndex=Math.max(0,Math.min(P.length-1,i));movingMarker.setPosition({lat:P[curIndex].lat,lng:P[curIndex].lng});updateUI(curIndex)}
     function updateUI(i){document.getElementById('idxLabel').textContent=`${P.length?(i+1):0} / ${P.length}`;document.getElementById('slider').value=Math.min(i,Math.max(0,P.length-1));
@@ -166,7 +194,9 @@
       }else{document.getElementById('segDist').textContent='-';document.getElementById('segTime').textContent='-';document.getElementById('segV').textContent='-';}}
     function startAnimation(){if(animTimer||P.length<2||!movingMarker)return;const step=()=>{if(curIndex>=P.length-1){stopAnimation();return}
         const i=curIndex,t=segTime[i],has=Number.isFinite(t)&&t>0,dt=has?(t*1000)/animSpeed:(400/animSpeed);const steps=20;let k=0;const a=P[i],b=P[i+1];
+        const addPerStep = has ? (t/steps) : (0.4/steps); 
         const interp=()=>{k++;const x=Math.min(1,k/steps);movingMarker.setPosition({lat:a.lat+(b.lat-a.lat)*x,lng:a.lng+(b.lng-a.lng)*x});
+          simElapsedS += addPerStep; setClock(simElapsedS);
           if(k<steps)animTimer=setTimeout(interp,dt/steps);else{curIndex=i+1;updateUI(curIndex);animTimer=setTimeout(step,0)}};interp()};step()}
     function stopAnimation(){if(animTimer){clearTimeout(animTimer);animTimer=null}}
 
@@ -181,6 +211,15 @@
     function cropToLastMeters(m=800){if(P.length<2||!map)return;const total=cumDist[cumDist.length-1]||0,target=Math.max(0,total-m);let start=0;for(let i=cumDist.length-1;i>=0;i--){if(cumDist[i]<=target){start=i;break}}
       const crop=P.slice(start).map(p=>({lat:p.lat,lng:p.lng}));const pl=new google.maps.Polyline({path:crop,map,strokeColor:'#111',strokeOpacity:.5,strokeWeight:8});
       const bounds=crop.reduce((b,c)=>{if(!b)return new google.maps.LatLngBounds(c,c);return b.extend(c)},null);if(bounds)map.fitBounds(bounds);showNote(`Vista recortada a últimos ${m} m (aprox.).`,2500)}
+
+    // Mostrar/ocultar panel
+    function togglePanel(forceHide){const p=document.getElementById('panel');const btn=document.getElementById('togglePanel');
+      const willHide = (typeof forceHide==='boolean') ? forceHide : (p.style.display!=='none' && window.innerWidth<900);
+      p.style.display = willHide ? 'none' : '';
+      btn.setAttribute('aria-pressed', willHide ? 'true' : 'false');
+    }
+    window.addEventListener('resize',()=>{ if(window.innerWidth>=900){document.getElementById('panel').style.display=''; document.getElementById('togglePanel').setAttribute('aria-pressed','false')} })
+
   </script>
 
   
